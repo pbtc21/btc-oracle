@@ -115,124 +115,441 @@ app.get("/", async (c) => {
   const currentBlock = await getCurrentBtcBlock(c.env);
   const btcPrice = await getBtcPrice();
 
-  // Get cached markets
-  const marketsData = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  // Get cached markets (handle missing KV gracefully)
+  let marketsData: Market[] = [];
+  try {
+    if (c.env.CACHE) {
+      marketsData = await c.env.CACHE.get("markets", "json") as Market[] || [];
+    }
+  } catch (e) {
+    console.error("KV error:", e);
+  }
   const activeMarkets = marketsData.filter(m => !m.settled);
+  const totalPool = marketsData.reduce((sum, m) => sum + m.yesPool + m.noPool, 0);
 
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BTC Oracle - Prediction Market</title>
+  <title>BTC Oracle</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --orange-50: #fff7ed;
+      --orange-100: #ffedd5;
+      --orange-200: #fed7aa;
+      --orange-300: #fdba74;
+      --orange-400: #fb923c;
+      --orange-500: #f97316;
+      --orange-600: #ea580c;
+      --orange-700: #c2410c;
+      --bg-dark: #0c0c0c;
+      --bg-card: #141414;
+      --bg-elevated: #1a1a1a;
+      --border: #262626;
+      --text-primary: #fafafa;
+      --text-secondary: #a3a3a3;
+      --text-muted: #525252;
+      --green: #22c55e;
+      --red: #ef4444;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%);
-      color: #fff;
+      font-family: 'Space Grotesk', -apple-system, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-primary);
       min-height: 100vh;
-      padding: 2rem;
+      line-height: 1.5;
     }
-    .container { max-width: 900px; margin: 0 auto; }
-    h1 {
-      font-size: 2.5rem;
-      margin-bottom: 0.5rem;
-      background: linear-gradient(90deg, #f7931a, #ff6b35);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+    .noise {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+      opacity: 0.03;
+      pointer-events: none;
+      z-index: 0;
     }
-    .subtitle { color: #888; margin-bottom: 2rem; }
+    .glow {
+      position: fixed;
+      top: -50%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100%;
+      max-width: 800px;
+      height: 600px;
+      background: radial-gradient(ellipse, rgba(249, 115, 22, 0.15) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 3rem 1.5rem;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 4rem;
+    }
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .logo-icon {
+      width: 48px;
+      height: 48px;
+      background: linear-gradient(135deg, var(--orange-500), var(--orange-600));
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      box-shadow: 0 0 30px rgba(249, 115, 22, 0.3);
+    }
+    .logo-text {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .tagline {
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      max-width: 500px;
+      margin: 0 auto 1rem;
+    }
+    .tagline-emphasis {
+      color: var(--orange-400);
+      font-weight: 500;
+    }
+    .sub-tagline {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Stats */
     .stats {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 1rem;
-      margin-bottom: 2rem;
+      gap: 1px;
+      background: var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      margin-bottom: 3rem;
     }
     .stat {
-      background: rgba(255,255,255,0.05);
-      border-radius: 12px;
-      padding: 1.5rem;
+      background: var(--bg-card);
+      padding: 1.75rem;
       text-align: center;
     }
-    .stat-value { font-size: 1.8rem; font-weight: bold; color: #f7931a; }
-    .stat-label { color: #888; font-size: 0.9rem; }
-    .section { margin-bottom: 2rem; }
-    .section-title { font-size: 1.3rem; margin-bottom: 1rem; color: #fff; }
+    .stat:first-child { border-radius: 16px 0 0 16px; }
+    .stat:last-child { border-radius: 0 16px 16px 0; }
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: -0.02em;
+    }
+    .stat-value .currency { color: var(--orange-500); }
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-top: 0.5rem;
+    }
+
+    /* Section */
+    .section {
+      margin-bottom: 3rem;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+    }
+    .section-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+    .section-badge {
+      font-size: 0.75rem;
+      color: var(--orange-400);
+      background: rgba(249, 115, 22, 0.1);
+      padding: 0.25rem 0.75rem;
+      border-radius: 100px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Market Card */
     .market-card {
-      background: rgba(255,255,255,0.05);
-      border-radius: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
       padding: 1.5rem;
       margin-bottom: 1rem;
-      border: 1px solid rgba(247, 147, 26, 0.2);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .market-card:hover {
+      border-color: var(--orange-700);
+      box-shadow: 0 0 40px rgba(249, 115, 22, 0.1);
+    }
+    .market-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 1rem;
     }
     .market-target {
       font-size: 1.5rem;
-      font-weight: bold;
-      color: #f7931a;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
     }
-    .market-desc { color: #aaa; margin: 0.5rem 0; }
-    .market-meta { display: flex; gap: 2rem; color: #888; font-size: 0.9rem; }
+    .market-target .symbol { color: var(--orange-500); }
+    .market-status {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 100px;
+      font-weight: 500;
+    }
+    .status-active {
+      background: rgba(34, 197, 94, 0.1);
+      color: var(--green);
+    }
+    .status-pending {
+      background: rgba(249, 115, 22, 0.1);
+      color: var(--orange-400);
+    }
+    .market-meta {
+      display: flex;
+      gap: 1.5rem;
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-bottom: 1.25rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .market-meta span {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+    .odds-container {
+      margin-bottom: 1rem;
+    }
     .odds-bar {
       display: flex;
-      height: 30px;
-      border-radius: 6px;
+      height: 40px;
+      border-radius: 8px;
       overflow: hidden;
-      margin: 1rem 0;
+      background: var(--bg-elevated);
     }
     .odds-yes {
-      background: linear-gradient(90deg, #22c55e, #16a34a);
+      background: linear-gradient(135deg, #16a34a, #22c55e);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-weight: bold;
+      font-weight: 600;
+      font-size: 0.875rem;
+      min-width: 60px;
+      transition: width 0.3s ease;
     }
     .odds-no {
-      background: linear-gradient(90deg, #ef4444, #dc2626);
+      background: linear-gradient(135deg, #dc2626, #ef4444);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-weight: bold;
+      font-weight: 600;
+      font-size: 0.875rem;
+      min-width: 60px;
+      transition: width 0.3s ease;
     }
-    .pool-info { display: flex; justify-content: space-between; color: #888; }
-    .api-section {
-      background: rgba(0,0,0,0.3);
-      border-radius: 12px;
-      padding: 1.5rem;
+    .pool-info {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .pool-info .yes { color: var(--green); }
+    .pool-info .no { color: var(--red); }
+
+    /* Empty State */
+    .empty {
+      text-align: center;
+      padding: 4rem 2rem;
+      background: var(--bg-card);
+      border: 1px dashed var(--border);
+      border-radius: 16px;
+    }
+    .empty-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+    .empty-text {
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+    .empty-cta {
+      color: var(--orange-400);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.875rem;
+    }
+
+    /* API Section */
+    .api-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
     }
     .endpoint {
       display: flex;
       align-items: center;
       gap: 1rem;
-      padding: 0.75rem 0;
-      border-bottom: 1px solid rgba(255,255,255,0.1);
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.2s;
     }
     .endpoint:last-child { border-bottom: none; }
+    .endpoint:hover { background: var(--bg-elevated); }
     .method {
+      font-size: 0.625rem;
+      font-weight: 700;
       padding: 0.25rem 0.5rem;
       border-radius: 4px;
-      font-size: 0.8rem;
-      font-weight: bold;
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.05em;
+      min-width: 44px;
+      text-align: center;
     }
-    .method-get { background: #22c55e; color: #000; }
-    .method-post { background: #3b82f6; color: #fff; }
-    .endpoint-path { font-family: monospace; color: #f7931a; }
-    .endpoint-desc { color: #888; margin-left: auto; }
-    .price-tag { color: #fbbf24; font-size: 0.8rem; }
-    a { color: #f7931a; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .empty { color: #666; text-align: center; padding: 2rem; }
+    .method-get { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+    .method-post { background: rgba(249, 115, 22, 0.15); color: var(--orange-400); }
+    .endpoint-path {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.875rem;
+      color: var(--text-primary);
+    }
+    .endpoint-desc {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      margin-left: auto;
+    }
+    .price-tag {
+      font-size: 0.75rem;
+      color: var(--orange-400);
+      background: rgba(249, 115, 22, 0.1);
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* How it works */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+    }
+    .step {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      text-align: center;
+    }
+    .step-num {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, var(--orange-600), var(--orange-500));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.875rem;
+      margin: 0 auto 0.75rem;
+    }
+    .step-title {
+      font-weight: 600;
+      font-size: 0.875rem;
+      margin-bottom: 0.25rem;
+    }
+    .step-desc {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      padding-top: 3rem;
+      border-top: 1px solid var(--border);
+      margin-top: 3rem;
+    }
+    .footer-text {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .footer-links {
+      display: flex;
+      justify-content: center;
+      gap: 1.5rem;
+      margin-top: 1rem;
+    }
+    .footer-links a {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .footer-links a:hover { color: var(--orange-400); }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .stats { grid-template-columns: 1fr; }
+      .stat { border-radius: 0 !important; }
+      .stat:first-child { border-radius: 16px 16px 0 0 !important; }
+      .stat:last-child { border-radius: 0 0 16px 16px !important; }
+      .steps { grid-template-columns: repeat(2, 1fr); }
+      .endpoint { flex-wrap: wrap; }
+      .endpoint-desc { width: 100%; margin-left: 0; margin-top: 0.5rem; }
+    }
   </style>
 </head>
 <body>
+  <div class="noise"></div>
+  <div class="glow"></div>
+
   <div class="container">
-    <h1>BTC Oracle</h1>
-    <p class="subtitle">Prediction Market for Bitcoin Price</p>
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">₿</div>
+        <span class="logo-text">BTC Oracle</span>
+      </div>
+      <p class="tagline">
+        Bet sBTC on price. Settle on <span class="tagline-emphasis">Bitcoin blocks</span>.
+        Trust the <span class="tagline-emphasis">Pyth</span>.
+      </p>
+      <p class="sub-tagline">no house · no edge · no trust required</p>
+    </header>
 
     <div class="stats">
       <div class="stat">
-        <div class="stat-value">$${btcPrice ? (btcPrice / 100).toLocaleString() : '---'}</div>
-        <div class="stat-label">Current BTC Price</div>
+        <div class="stat-value"><span class="currency">$</span>${btcPrice ? (btcPrice / 100).toLocaleString() : '---'}</div>
+        <div class="stat-label">BTC Price</div>
       </div>
       <div class="stat">
         <div class="stat-value">${currentBlock.toLocaleString()}</div>
@@ -245,26 +562,44 @@ app.get("/", async (c) => {
     </div>
 
     <div class="section">
-      <h2 class="section-title">Active Markets</h2>
-      ${activeMarkets.length === 0 ? '<div class="empty">No active markets. Create one via the API!</div>' : ''}
+      <div class="section-header">
+        <h2 class="section-title">Markets</h2>
+        ${totalPool > 0 ? '<span class="section-badge">' + (totalPool / 100000000).toFixed(4) + ' sBTC total</span>' : ''}
+      </div>
+      ${activeMarkets.length === 0 ? `
+        <div class="empty">
+          <div class="empty-icon">◎</div>
+          <p class="empty-text">No active markets yet</p>
+          <p class="empty-cta">POST /create to open the first one</p>
+        </div>
+      ` : ''}
       ${activeMarkets.map(m => {
         const odds = calculateOdds(m.yesPool, m.noPool);
         const blocksRemaining = m.settlementBlock - currentBlock;
+        const isSettlementPending = blocksRemaining <= 0;
         return `
         <div class="market-card">
-          <div class="market-target">BTC ${m.targetPrice >= (btcPrice || 0) ? '≥' : '<'} $${(m.targetPrice / 100).toLocaleString()}</div>
-          <div class="market-desc">${m.description}</div>
-          <div class="market-meta">
-            <span>Block ${m.settlementBlock.toLocaleString()}</span>
-            <span>${blocksRemaining > 0 ? `~${blocksRemaining} blocks remaining` : 'Settlement pending'}</span>
+          <div class="market-header">
+            <div class="market-target">
+              <span class="symbol">BTC</span> ${m.targetPrice >= (btcPrice || 0) ? '≥' : '<'} $${(m.targetPrice / 100).toLocaleString()}
+            </div>
+            <span class="market-status ${isSettlementPending ? 'status-pending' : 'status-active'}">
+              ${isSettlementPending ? 'Settlement Ready' : 'Live'}
+            </span>
           </div>
-          <div class="odds-bar">
-            <div class="odds-yes" style="width: ${odds.yesOdds}%">YES ${odds.yesOdds}%</div>
-            <div class="odds-no" style="width: ${odds.noOdds}%">NO ${odds.noOdds}%</div>
+          <div class="market-meta">
+            <span>◷ Block ${m.settlementBlock.toLocaleString()}</span>
+            <span>${blocksRemaining > 0 ? blocksRemaining.toLocaleString() + ' blocks left' : 'Ready to settle'}</span>
+          </div>
+          <div class="odds-container">
+            <div class="odds-bar">
+              <div class="odds-yes" style="width: ${Math.max(odds.yesOdds, 15)}%">YES ${odds.yesOdds}%</div>
+              <div class="odds-no" style="width: ${Math.max(odds.noOdds, 15)}%">NO ${odds.noOdds}%</div>
+            </div>
           </div>
           <div class="pool-info">
-            <span>YES: ${(m.yesPool / 100000000).toFixed(8)} sBTC</span>
-            <span>NO: ${(m.noPool / 100000000).toFixed(8)} sBTC</span>
+            <span class="yes">${(m.yesPool / 100000000).toFixed(6)} sBTC</span>
+            <span class="no">${(m.noPool / 100000000).toFixed(6)} sBTC</span>
           </div>
         </div>
         `;
@@ -272,8 +607,38 @@ app.get("/", async (c) => {
     </div>
 
     <div class="section">
-      <h2 class="section-title">API Endpoints</h2>
-      <div class="api-section">
+      <div class="section-header">
+        <h2 class="section-title">How It Works</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-title">Create</div>
+          <div class="step-desc">Set price target & settlement block</div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-title">Bet</div>
+          <div class="step-desc">Stake sBTC on YES or NO</div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-title">Settle</div>
+          <div class="step-desc">Pyth oracle reports truth</div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-title">Claim</div>
+          <div class="step-desc">Winners split the pool</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-header">
+        <h2 class="section-title">API</h2>
+      </div>
+      <div class="api-card">
         <div class="endpoint">
           <span class="method method-get">GET</span>
           <span class="endpoint-path">/markets</span>
@@ -282,7 +647,7 @@ app.get("/", async (c) => {
         <div class="endpoint">
           <span class="method method-get">GET</span>
           <span class="endpoint-path">/market/:id</span>
-          <span class="endpoint-desc">Get market details</span>
+          <span class="endpoint-desc">Market details + odds</span>
         </div>
         <div class="endpoint">
           <span class="method method-post">POST</span>
@@ -293,12 +658,12 @@ app.get("/", async (c) => {
         <div class="endpoint">
           <span class="method method-post">POST</span>
           <span class="endpoint-path">/bet</span>
-          <span class="endpoint-desc">Generate bet transaction</span>
+          <span class="endpoint-desc">Generate bet tx</span>
         </div>
         <div class="endpoint">
           <span class="method method-post">POST</span>
           <span class="endpoint-path">/settle/:id</span>
-          <span class="endpoint-desc">Settle market</span>
+          <span class="endpoint-desc">Trigger settlement</span>
         </div>
         <div class="endpoint">
           <span class="method method-post">POST</span>
@@ -308,19 +673,14 @@ app.get("/", async (c) => {
       </div>
     </div>
 
-    <div class="section">
-      <h2 class="section-title">How It Works</h2>
-      <ol style="color: #aaa; padding-left: 1.5rem; line-height: 1.8;">
-        <li>Create a market predicting BTC price at a future Bitcoin block</li>
-        <li>Users bet sBTC on YES (price ≥ target) or NO (price < target)</li>
-        <li>After settlement block, anyone can trigger settlement via Pyth oracle</li>
-        <li>Winners claim proportional share of the pool (2% protocol fee)</li>
-      </ol>
-    </div>
-
-    <p style="color: #666; text-align: center; margin-top: 3rem;">
-      Powered by <a href="https://pyth.network">Pyth Network</a> oracle on Stacks
-    </p>
+    <footer class="footer">
+      <p class="footer-text">Parimutuel betting · 2% protocol fee · On-chain settlement</p>
+      <div class="footer-links">
+        <a href="https://pyth.network" target="_blank">Pyth Network</a>
+        <a href="https://stacks.co" target="_blank">Stacks</a>
+        <a href="/api">API Docs</a>
+      </div>
+    </footer>
   </div>
 </body>
 </html>`;
