@@ -42,8 +42,12 @@ const PRICES = {
 
 const app = new Hono<{ Bindings: Env }>();
 
-// CORS
-app.use("*", cors());
+// CORS - restrict in production
+app.use("*", cors({
+  origin: ['https://btc-oracle.p-d07.workers.dev', 'http://localhost:8787'],
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'X-Payment'],
+}));
 
 // ============================================
 // UTILITIES
@@ -54,6 +58,36 @@ function json(data: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+// Escape HTML to prevent XSS
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// Validate Stacks address format
+function isValidStacksAddress(addr: string): boolean {
+  return /^S[PM][A-Z0-9]{38,40}$/.test(addr);
+}
+
+// Safe parseInt with NaN handling
+function safeParseInt(val: string): number | null {
+  const parsed = parseInt(val, 10);
+  return isNaN(parsed) ? null : parsed;
+}
+
+// Safe JSON parse for request body
+async function safeJsonParse<T>(c: { req: { json: () => Promise<T> } }): Promise<T | null> {
+  try {
+    return await c.req.json();
+  } catch {
+    return null;
+  }
 }
 
 function payment402(description: string, price: number) {
@@ -767,7 +801,11 @@ app.get("/markets", async (c) => {
 
 // Get single market
 app.get("/market/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
+  const id = safeParseInt(c.req.param("id"));
+  if (id === null) {
+    return json({ error: "Invalid market ID" }, 400);
+  }
+
   const markets = await getMarkets(c.env);
   const market = markets.find(m => m.id === id);
 
@@ -796,43 +834,72 @@ app.post("/create", async (c) => {
     return payment402("Create prediction market", PRICES.CREATE_MARKET);
   }
 
-  const body = await c.req.json() as {
+  // Validate payment format (should be a tx ID - 64 hex chars)
+  if (!/^[a-fA-F0-9]{64}$/.test(payment)) {
+    return json({ error: "Invalid payment transaction ID" }, 400);
+  }
+
+  const body = await safeJsonParse<{
     targetPrice: number;
     settlementBlock: number;
     description?: string;
-  };
+  }>(c);
+
+  if (!body) {
+    return json({ error: "Invalid JSON body" }, 400);
+  }
 
   // Validation
-  if (!body.targetPrice || body.targetPrice <= 0) {
-    return json({ error: "Invalid target price" }, 400);
+  if (typeof body.targetPrice !== 'number' || body.targetPrice <= 0 || body.targetPrice > 100000000000) {
+    return json({ error: "Invalid target price (must be positive number, max $1B)" }, 400);
   }
 
   const currentBlock = await getCurrentBtcBlock(c.env);
-  const minBlock = currentBlock + 144; // ~24 hours
+  if (currentBlock === 0) {
+    return json({ error: "Could not fetch current block" }, 500);
+  }
 
-  if (!body.settlementBlock || body.settlementBlock < minBlock) {
+  const minBlock = currentBlock + 144; // ~24 hours
+  const maxBlock = currentBlock + 52560; // ~1 year
+
+  if (typeof body.settlementBlock !== 'number' || body.settlementBlock < minBlock) {
     return json({
-      error: "Settlement block too soon",
+      error: "Settlement block too soon (minimum 144 blocks / ~24 hours)",
       minimumBlock: minBlock,
       currentBlock,
     }, 400);
   }
 
+  if (body.settlementBlock > maxBlock) {
+    return json({
+      error: "Settlement block too far (maximum ~1 year)",
+      maximumBlock: maxBlock,
+      currentBlock,
+    }, 400);
+  }
+
+  // Sanitize description
+  const description = body.description
+    ? escapeHtml(body.description.slice(0, 200))
+    : `BTC >= $${(body.targetPrice / 100).toLocaleString()} by block ${body.settlementBlock}`;
+
   // Get existing markets
   const markets = await getMarkets(c.env);
-  const newId = markets.length;
+
+  // Generate unique ID (use timestamp + length to avoid race conditions)
+  const newId = Date.now() * 1000 + markets.length;
 
   const newMarket: Market = {
     id: newId,
-    creator: payment.slice(0, 20), // Use payment tx as pseudo-creator
-    targetPrice: body.targetPrice,
-    settlementBlock: body.settlementBlock,
+    creator: payment.slice(0, 20),
+    targetPrice: Math.round(body.targetPrice),
+    settlementBlock: Math.round(body.settlementBlock),
     yesPool: 0,
     noPool: 0,
     settled: false,
     winningSide: null,
     settlementPrice: 0,
-    description: body.description || `BTC >= $${(body.targetPrice / 100).toLocaleString()} by block ${body.settlementBlock}`,
+    description,
     createdAt: new Date().toISOString(),
   };
 
@@ -850,23 +917,36 @@ app.post("/create", async (c) => {
 
 // Generate bet transaction
 app.post("/bet", async (c) => {
-  const body = await c.req.json() as {
+  const body = await safeJsonParse<{
     marketId: number;
-    side: "yes" | "no";
-    amount: number; // in sats
+    side: string;
+    amount: number;
     sender: string;
-  };
+  }>(c);
 
-  // Validation
-  if (body.marketId === undefined || !body.side || !body.amount || !body.sender) {
-    return json({
-      error: "Missing required fields",
-      required: { marketId: "number", side: "yes|no", amount: "sats", sender: "address" }
-    }, 400);
+  if (!body) {
+    return json({ error: "Invalid JSON body" }, 400);
   }
 
-  if (body.amount < 1000) {
+  // Validation
+  if (typeof body.marketId !== 'number') {
+    return json({ error: "marketId must be a number" }, 400);
+  }
+
+  if (body.side !== "yes" && body.side !== "no") {
+    return json({ error: "side must be 'yes' or 'no'" }, 400);
+  }
+
+  if (typeof body.amount !== 'number' || body.amount < 1000) {
     return json({ error: "Minimum bet is 1000 sats" }, 400);
+  }
+
+  if (body.amount > 100000000000) { // 1000 BTC max
+    return json({ error: "Maximum bet is 1000 BTC" }, 400);
+  }
+
+  if (!body.sender || !isValidStacksAddress(body.sender)) {
+    return json({ error: "Invalid sender address" }, 400);
   }
 
   const markets = await getMarkets(c.env);
@@ -896,13 +976,13 @@ app.post("/bet", async (c) => {
       functionName,
       functionArgs: [
         { type: "uint", value: body.marketId },
-        { type: "uint", value: body.amount },
+        { type: "uint", value: Math.round(body.amount) },
       ],
       postConditions: [
         {
           type: "stx-transfer",
           sender: body.sender,
-          amount: body.amount,
+          amount: Math.round(body.amount),
         },
       ],
     },
@@ -918,7 +998,11 @@ app.post("/bet", async (c) => {
 
 // Trigger settlement
 app.post("/settle/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
+  const id = safeParseInt(c.req.param("id"));
+  if (id === null) {
+    return json({ error: "Invalid market ID" }, 400);
+  }
+
   const markets = await getMarkets(c.env);
   const marketIndex = markets.findIndex(m => m.id === id);
 
@@ -977,11 +1061,19 @@ app.post("/settle/:id", async (c) => {
 
 // Generate claim transaction
 app.post("/claim/:id", async (c) => {
-  const id = parseInt(c.req.param("id"));
-  const body = await c.req.json() as { sender: string };
+  const id = safeParseInt(c.req.param("id"));
+  if (id === null) {
+    return json({ error: "Invalid market ID" }, 400);
+  }
 
-  if (!body.sender) {
-    return json({ error: "Sender address required" }, 400);
+  const body = await safeJsonParse<{ sender: string }>(c);
+
+  if (!body) {
+    return json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!body.sender || !isValidStacksAddress(body.sender)) {
+    return json({ error: "Invalid sender address" }, 400);
   }
 
   const markets = await getMarkets(c.env);
@@ -1014,21 +1106,34 @@ app.post("/claim/:id", async (c) => {
   });
 });
 
-// Demo endpoint - add a test market
+// Demo endpoint - add a test market (limited)
 app.post("/demo/create-test-market", async (c) => {
+  const markets = await getMarkets(c.env);
+
+  // Limit demo markets to prevent spam
+  const demoMarkets = markets.filter(m => m.creator === "demo");
+  if (demoMarkets.length >= 5) {
+    return json({
+      error: "Demo market limit reached (max 5)",
+      existingDemoMarkets: demoMarkets.length
+    }, 429);
+  }
+
   const currentBlock = await getCurrentBtcBlock(c.env);
   const btcPrice = await getBtcPrice();
 
-  const markets = await getMarkets(c.env);
+  if (currentBlock === 0) {
+    return json({ error: "Could not fetch current block" }, 500);
+  }
 
-  // Create a test market
+  // Create a test market with unique ID
   const testMarket: Market = {
-    id: markets.length,
+    id: Date.now(),
     creator: "demo",
-    targetPrice: btcPrice ? btcPrice + 500000 : 15000000, // Current + $5k or $150k
-    settlementBlock: currentBlock + 1000, // ~1 week
-    yesPool: 50000, // 50k sats
-    noPool: 30000, // 30k sats
+    targetPrice: btcPrice ? btcPrice + 500000 : 15000000,
+    settlementBlock: currentBlock + 1000,
+    yesPool: 50000,
+    noPool: 30000,
     settled: false,
     winningSide: null,
     settlementPrice: 0,
