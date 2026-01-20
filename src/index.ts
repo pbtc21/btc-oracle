@@ -83,13 +83,29 @@ async function getCurrentBtcBlock(env: Env): Promise<number> {
 }
 
 async function getBtcPrice(): Promise<number> {
-  try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
-    const data = (await res.json()) as { bitcoin: { usd: number } };
-    return Math.round(data.bitcoin.usd * 100); // cents
-  } catch {
-    return 0;
+  // Try multiple sources
+  const sources = [
+    async () => {
+      const res = await fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot");
+      const data = (await res.json()) as { data: { amount: string } };
+      return Math.round(parseFloat(data.data.amount) * 100);
+    },
+    async () => {
+      const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+      const data = (await res.json()) as { bitcoin: { usd: number } };
+      return Math.round(data.bitcoin.usd * 100);
+    },
+  ];
+
+  for (const source of sources) {
+    try {
+      const price = await source();
+      if (price > 0) return price;
+    } catch {
+      continue;
+    }
   }
+  return 0;
 }
 
 function calculateOdds(yesPool: number, noPool: number) {
@@ -107,6 +123,26 @@ function calculateOdds(yesPool: number, noPool: number) {
   };
 }
 
+// KV helpers with graceful fallback
+async function getMarkets(env: Env): Promise<Market[]> {
+  if (!env.CACHE) return [];
+  try {
+    return await env.CACHE.get("markets", "json") as Market[] || [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveMarkets(env: Env, markets: Market[]): Promise<boolean> {
+  if (!env.CACHE) return false;
+  try {
+    await env.CACHE.put("markets", JSON.stringify(markets));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ============================================
 // HOMEPAGE / UI
 // ============================================
@@ -115,15 +151,8 @@ app.get("/", async (c) => {
   const currentBlock = await getCurrentBtcBlock(c.env);
   const btcPrice = await getBtcPrice();
 
-  // Get cached markets (handle missing KV gracefully)
-  let marketsData: Market[] = [];
-  try {
-    if (c.env.CACHE) {
-      marketsData = await c.env.CACHE.get("markets", "json") as Market[] || [];
-    }
-  } catch (e) {
-    console.error("KV error:", e);
-  }
+  // Get cached markets
+  const marketsData = await getMarkets(c.env);
   const activeMarkets = marketsData.filter(m => !m.settled);
   const totalPool = marketsData.reduce((sum, m) => sum + m.yesPool + m.noPool, 0);
 
@@ -720,7 +749,7 @@ app.get("/api", async (c) => {
 
 // List all markets
 app.get("/markets", async (c) => {
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
   const currentBlock = await getCurrentBtcBlock(c.env);
 
   return json({
@@ -738,7 +767,7 @@ app.get("/markets", async (c) => {
 // Get single market
 app.get("/market/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
   const market = markets.find(m => m.id === id);
 
   if (!market) {
@@ -789,7 +818,7 @@ app.post("/create", async (c) => {
   }
 
   // Get existing markets
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
   const newId = markets.length;
 
   const newMarket: Market = {
@@ -807,7 +836,7 @@ app.post("/create", async (c) => {
   };
 
   markets.push(newMarket);
-  await c.env.CACHE.put("markets", JSON.stringify(markets));
+  await saveMarkets(c.env, markets);
 
   return json({
     success: true,
@@ -839,7 +868,7 @@ app.post("/bet", async (c) => {
     return json({ error: "Minimum bet is 1000 sats" }, 400);
   }
 
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
   const market = markets.find(m => m.id === body.marketId);
 
   if (!market) {
@@ -889,7 +918,7 @@ app.post("/bet", async (c) => {
 // Trigger settlement
 app.post("/settle/:id", async (c) => {
   const id = parseInt(c.req.param("id"));
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
   const marketIndex = markets.findIndex(m => m.id === id);
 
   if (marketIndex === -1) {
@@ -928,7 +957,7 @@ app.post("/settle/:id", async (c) => {
     settlementPrice: btcPrice,
   };
 
-  await c.env.CACHE.put("markets", JSON.stringify(markets));
+  await saveMarkets(c.env, markets);
 
   return json({
     success: true,
@@ -954,7 +983,7 @@ app.post("/claim/:id", async (c) => {
     return json({ error: "Sender address required" }, 400);
   }
 
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
   const market = markets.find(m => m.id === id);
 
   if (!market) {
@@ -989,7 +1018,7 @@ app.post("/demo/create-test-market", async (c) => {
   const currentBlock = await getCurrentBtcBlock(c.env);
   const btcPrice = await getBtcPrice();
 
-  const markets = await c.env.CACHE.get("markets", "json") as Market[] || [];
+  const markets = await getMarkets(c.env);
 
   // Create a test market
   const testMarket: Market = {
@@ -1007,7 +1036,7 @@ app.post("/demo/create-test-market", async (c) => {
   };
 
   markets.push(testMarket);
-  await c.env.CACHE.put("markets", JSON.stringify(markets));
+  await saveMarkets(c.env, markets);
 
   return json({
     success: true,
