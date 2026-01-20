@@ -73,8 +73,9 @@ function payment402(description: string, price: number) {
 }
 
 async function getCurrentBtcBlock(env: Env): Promise<number> {
+  const apiBase = env.HIRO_API || "https://api.hiro.so";
   try {
-    const res = await fetch(`${env.HIRO_API}/extended/v2/burn-blocks?limit=1`);
+    const res = await fetch(`${apiBase}/extended/v2/burn-blocks?limit=1`);
     const data = (await res.json()) as { results: { burn_block_height: number }[] };
     return data.results[0]?.burn_block_height || 0;
   } catch {
