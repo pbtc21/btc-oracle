@@ -2,12 +2,6 @@
 ;; Bet sBTC on Bitcoin price targets, settled via Pyth oracle
 
 ;; ============================================
-;; TRAITS
-;; ============================================
-
-(use-trait ft-trait .traits.sip-010-trait.sip-010-trait)
-
-;; ============================================
 ;; CONSTANTS
 ;; ============================================
 

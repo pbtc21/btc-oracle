@@ -1,0 +1,14 @@
+[project]
+name = "btc-oracle"
+description = "BTC Price Prediction Market"
+authors = ["pbtc21"]
+telemetry = false
+cache_dir = "./.cache"
+
+[contracts.prediction-market]
+path = "contracts/prediction-market.clar"
+clarity_version = 3
+epoch = 3.0
+
+[repl.analysis]
+passes = ["check_checker"]

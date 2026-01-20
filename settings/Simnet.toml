@@ -1,0 +1,11 @@
+[network]
+name = "simnet"
+deployment_fee_rate = 10
+
+[accounts.deployer]
+mnemonic = "clinic thunder appear violin gas wheat emerge zebra notice drill curtain whisper bronze exhaust guitar edit bundle distance pelican silk popular video sure abandon"
+balance = 100_000_000_000_000
+
+[accounts.wallet_1]
+mnemonic = "sell invite acquire kitten bamboo drastic jelly vivid peace spawn twice guilt pave pen trash pretty park cube fragile unaware emerge tag vote rude"
+balance = 100_000_000_000_000
