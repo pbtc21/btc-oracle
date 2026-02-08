@@ -826,6 +826,39 @@ app.get("/market/:id", async (c) => {
   });
 });
 
+// x402 discovery for market creation
+app.get("/create", (c) => {
+  const paymentAddress = c.env.PAYMENT_ADDRESS || "SPKH9AWG0ENZ87J1X0PBD4HETP22G8W22AFNVF8K";
+  return c.json({
+    x402Version: 1,
+    name: "BTC Oracle - Create Prediction Market",
+    image: "https://btc-oracle.p-d07.workers.dev/oracle-icon.png",
+    accepts: [{
+      scheme: "exact",
+      network: "stacks",
+      maxAmountRequired: String(PRICES.CREATE_MARKET),
+      resource: "/create",
+      description: "Create a BTC price prediction market with sBTC betting and Pyth oracle settlement",
+      mimeType: "application/json",
+      payTo: paymentAddress,
+      maxTimeoutSeconds: 600,
+      asset: "STX",
+      outputSchema: {
+        input: { type: "http", method: "POST", bodyType: "json" },
+        output: {
+          type: "object",
+          properties: {
+            success: { type: "boolean" },
+            marketId: { type: "number" },
+            targetPrice: { type: "number" },
+            settlementBlock: { type: "number" }
+          }
+        }
+      }
+    }]
+  });
+});
+
 // Create market (x402 gated)
 app.post("/create", async (c) => {
   const payment = c.req.header("X-Payment");
